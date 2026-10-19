@@ -49,7 +49,11 @@ uv sync
 The device is picked automatically: on Apple Silicon `tensorflow-metal` is installed and the GPU is used;
 elsewhere it runs on CPU, or on an NVIDIA GPU if TensorFlow finds the CUDA libraries it was built against
 (on Linux, `uv pip install "tensorflow[and-cuda]==2.19.1"` provides them; this path is untested).
-`--cpu` forces CPU. TensorFlow 2.19 has wheels for Python 3.9 to 3.12, so the project uses Python 3.12.
+`--cpu` forces CPU.
+
+On Apple Silicon, TensorFlow is held below 2.20 (and so Python at 3.12) because the latest
+`tensorflow-metal` does not load with newer TensorFlow. Elsewhere there is no upper bound; besides the
+locked versions, the tests also pass with TensorFlow 2.21 and numpy 2.5 on Python 3.13.
 
 ## Predict
 

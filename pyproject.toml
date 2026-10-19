@@ -6,11 +6,13 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
-    "tensorflow==2.19.1",
-    "tensorflow-metal==1.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # tensorflow-metal 1.2.0 (the latest) breaks `import tensorflow` on TF >= 2.20
+    "tensorflow>=2.18,<2.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "tensorflow>=2.18; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    "tensorflow-metal>=1.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "keras>=3.10",
     "h5py>=3.12",
-    "numpy>=1.26,<2.2",
+    "numpy>=1.26",
     "scipy>=1.14",
     "librosa>=0.11",
     "resampy>=0.4.3",
