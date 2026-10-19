@@ -1,5 +1,5 @@
 """
-Predict multiple F0 output from input audio or folder.
+Predict multiple F0 output from input audio files or folders.
 This code is linked to the ISMIR paper:
 
 Helena Cuesta, Brian McFee and Emilia Gómez (2020).
@@ -8,233 +8,101 @@ In Proceedings of the 21st International Society for Music Information Retrieval
 Montreal, Canada (virtual).
 """
 
-from __future__ import print_function
-import models
-import utils
-import utils_train
+import argparse
+import os
+from pathlib import Path
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import numpy as np
+import tensorflow as tf
 
-import os
-import argparse
+import features
+import models
+import utils
 
-
-def get_single_test_prediction_phase_free(model, audio_file=None):
-    """Generate output from a model given an input numpy file
-    """
-
-    if audio_file is not None:
-        # should not be the case
-        pump = utils.create_pump_object()
-        features = utils.compute_pump_features(pump, audio_file)
-        input_hcqt = features['dphase/mag'][0]
-
-
-    else:
-        raise ValueError("one of npy_file or audio_file must be specified")
-
-    input_hcqt = input_hcqt.transpose(1, 2, 0)[np.newaxis, :, :, :]
-
-    n_t = input_hcqt.shape[2]
-    t_slices = list(np.arange(0, n_t, 5000))
-    output_list = []
-    # we need two inputs
-    for t in t_slices:
-        p = model.predict(np.transpose(input_hcqt[:, :, t:t+5000, :], (0, 1, 3, 2)))[0, :, :]
-
-        output_list.append(p)
-
-    predicted_output = np.hstack(output_list)
-    return predicted_output, input_hcqt
-
-def get_single_test_prediction(model, audio_file=None):
-    """Generate output from a model given an input numpy file.
-       Part of this function is part of deepsalience
-    """
-
-    if audio_file is not None:
-
-        pump = utils.create_pump_object()
-        features = utils.compute_pump_features(pump, audio_file)
-        input_hcqt = features['dphase/mag'][0]
-        input_dphase = features['dphase/dphase'][0]
-
-    else:
-        raise ValueError("One audio_file must be specified")
-
-    input_hcqt = input_hcqt.transpose(1, 2, 0)[np.newaxis, :, :, :]
-    input_dphase = input_dphase.transpose(1, 2, 0)[np.newaxis, :, :, :]
-
-    n_t = input_hcqt.shape[2]
-    t_slices = list(np.arange(0, n_t, 5000))
-    output_list = []
-
-    for t in t_slices:
-        p = model.predict([np.transpose(input_hcqt[:, :, t:t+5000, :], (0, 1, 3, 2)),
-                           np.transpose(input_dphase[:, :, t:t+5000, :], (0, 1, 3, 2))]
-                          )[0, :, :]
-
-        output_list.append(p)
-
-    predicted_output = np.hstack(output_list)
-    return predicted_output, input_hcqt, input_dphase
+AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".aiff", ".aif", ".mp3"}
+# Frames per model call (~58 s), to bound memory. Each chunk is padded with
+# CONTEXT_FRAMES of real neighbouring input, which covers the networks' temporal
+# receptive field (+/-12 frames), so the result equals a single pass over the
+# whole file (which is what the original code effectively did).
+CHUNK_FRAMES = 5000
+CONTEXT_FRAMES = 16
 
 
-def main(args):
+def predict_salience(model, audio_path):
+    """Return the model's pitch salience, shape (360 freq bins, n_frames), float32."""
+    mag, dphase = features.compute_hcqt(audio_path)
+    n_frames = mag.shape[1]
+    chunks = []
+    for start in range(0, n_frames, CHUNK_FRAMES):
+        end = min(start + CHUNK_FRAMES, n_frames)
+        lo, hi = max(0, start - CONTEXT_FRAMES), min(n_frames, end + CONTEXT_FRAMES)
+        out = model([mag[np.newaxis, :, lo:hi], dphase[np.newaxis, :, lo:hi]], training=False)[0]
+        chunks.append(np.asarray(out)[:, start - lo : end - lo])
+    return np.hstack(chunks).astype(np.float32)
 
-    model_name = args.model_name
-    audiofile = args.audiofile
-    audio_folder = args.audio_folder
 
-    # load model weights
-    if model_name == 'model1':
+def predict_file(model, threshold, audio_path, output_dir=None, save_salience=False):
+    """Run multiple F0 estimation on one file and write <name>.csv; returns the CSV path."""
+    audio_path = Path(audio_path)
+    out_dir = Path(output_dir) if output_dir else audio_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        save_key = 'exp1multif0'
-        model_path = "./models/{}.pkl".format(save_key)
-        model = models.build_model1()
-        model.load_weights(model_path)
-        thresh = 0.4
+    salience = predict_salience(model, audio_path)
+    times, freqs = utils.pitch_activations_to_mf0(salience, threshold)
 
-    elif model_name == 'model2':
+    csv_path = out_dir / f"{audio_path.stem}.csv"
+    utils.save_multif0_output(times, freqs, csv_path)
+    if save_salience:
+        np.save(out_dir / f"{audio_path.stem}_salience.npy", salience)
+    return csv_path
 
-        save_key = 'exp2multif0'
-        model_path = "./models/{}.pkl".format(save_key)
-        model = models.build_model2()
-        model.load_weights(model_path)
-        thresh = 0.5
 
-    elif model_name == 'model3':
-
-        save_key = 'exp3multif0'
-        model_path = "./models/{}.pkl".format(save_key)
-        model = models.build_model3()
-        model.load_weights(model_path)
-        thresh = 0.5
-
-    elif model_name == 'model4':
-
-        save_key = 'exp4multif0'
-        model_path = "./models/{}.pkl".format(save_key)
-        model = models.build_model3()
-        model.load_weights(model_path)
-        thresh = 0.4
-
-    elif model_name == 'model7':
-
-        save_key = 'exp7multif0'
-        model_path = "./models/{}.pkl".format(save_key)
-        model = models.build_model3_mag()
-        model.load_weights(model_path)
-        thresh = 0.4
-
-    else:
-        raise ValueError("Specified model must be model1, model2 or model3.")
-
-    # compile model
-
-    model.compile(
-        loss=utils_train.bkld, metrics=['mse', utils_train.soft_binary_accuracy],
-        optimizer='adam'
-    )
-    print("Model compiled")
-
-    # select operation mode and compute prediction
-    if audiofile is not "0":
-
-        if model_name == 'model7':
-            # predict using trained model
-            predicted_output, _ = get_single_test_prediction_phase_free(
-                model, audio_file=os.path.join(
-                    audio_folder, audiofile)
-            )
+def find_audio_files(paths):
+    files = []
+    for p in map(Path, paths):
+        if p.is_dir():
+            files.extend(sorted(f for f in p.iterdir() if f.suffix.lower() in AUDIO_EXTENSIONS))
+        elif p.is_file():
+            files.append(p)
         else:
-            # predict using trained model
-            predicted_output, _, _ = get_single_test_prediction(
-                model, audio_file=audiofile
-            )
+            raise FileNotFoundError(p)
+    return files
 
-        predicted_output = predicted_output.astype(np.float32)
 
-        est_times, est_freqs = utils_train.pitch_activations_to_mf0(predicted_output, thresh)
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Predict multiple F0 output of audio files, or of all audio files inside folders.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="models:\n" + "\n".join(f"  {k}  {m.description}" for k, m in models.PRETRAINED.items()),
+    )
+    parser.add_argument("inputs", nargs="+", help="audio files and/or folders of audio files")
+    parser.add_argument("--model", default="model3", choices=models.PRETRAINED, help="pretrained model (default: model3)")
+    parser.add_argument("--threshold", type=float, help="peak threshold (default: the model's tuned value)")
+    parser.add_argument("--output-dir", help="where to write outputs (default: next to each input file)")
+    parser.add_argument("--save-salience", action="store_true", help="also save the raw salience as <name>_salience.npy")
+    parser.add_argument("--cpu", action="store_true", help="run on CPU even if a GPU (Metal) is available")
+    args = parser.parse_args(argv)
 
-        # rearrange output
-        for i, (tms, fqs) in enumerate(zip(est_times, est_freqs)):
-            if any(fqs <= 0):
-                est_freqs[i] = np.array([f for f in fqs if f > 0])
+    try:
+        audio_files = find_audio_files(args.inputs)
+    except FileNotFoundError as e:
+        parser.error(f"no such file or folder: {e}")
+    if not audio_files:
+        parser.error("no audio files found")
 
-        output_path = audiofile.replace('wav', 'csv')
-        utils_train.save_multif0_output(est_times, est_freqs, output_path)
+    if args.cpu:
+        tf.config.set_visible_devices([], "GPU")
 
-        print(" > > > Multiple F0 prediction for {} exported as {}.".format(
-            audiofile, audiofile.replace('wav', 'csv'))
-        )
+    pretrained = models.PRETRAINED[args.model]
+    threshold = pretrained.threshold if args.threshold is None else args.threshold
+    model = pretrained.load()
 
-    elif audio_folder is not "0":
-
-        for audiofile in os.listdir(audio_folder):
-
-            if not audiofile.endswith('wav'): continue
-
-            if model_name == 'model7':
-                # predict using trained model
-                predicted_output, _ = get_single_test_prediction_phase_free(
-                    model, audio_file=os.path.join(
-                        audio_folder, audiofile)
-                )
-
-            else:
-
-                # predict using trained model
-                predicted_output, _, _ = get_single_test_prediction(
-                    model, audio_file=os.path.join(
-                        audio_folder, audiofile)
-                )
-
-            predicted_output = predicted_output.astype(np.float32)
-
-            est_times, est_freqs = utils_train.pitch_activations_to_mf0(predicted_output, thresh)
-
-            # rearrange output
-            for i, (tms, fqs) in enumerate(zip(est_times, est_freqs)):
-                if any(fqs <= 0):
-                    est_freqs[i] = np.array([f for f in fqs if f > 0])
-
-            output_path = os.path.join(
-                    audio_folder, audiofile.replace('wav', 'csv')
-            )
-            utils_train.save_multif0_output(est_times, est_freqs, output_path)
-
-            print(" > > > Multiple F0 prediction for {} exported as {}.".format(
-                audiofile, os.path.join(
-                    audio_folder, audiofile.replace('wav', 'csv')
-                ))
-            )
-    else:
-        raise ValueError("One of audiofile and audio_folder must be specified.")
+    for audio_file in audio_files:
+        csv_path = predict_file(model, threshold, audio_file, args.output_dir, args.save_salience)
+        print(f"{audio_file} -> {csv_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Predict multiple F0 output of an input audio file or all the audio files inside a folder.")
-
-    parser.add_argument("--model",
-                        dest='model_name',
-                        type=str,
-                        help="Specify the ID of the model"
-                             "to use for the prediction: model1 (Early/Deep) / "
-                             "model2 (Early/Shallow) / "
-                             "model3 (Late/Deep, recommended)")
-
-    parser.add_argument("--audiofile",
-                        dest='audiofile',
-                        default="0",
-                        type=str,
-                        help="Path to the audio file to analyze. If using the folder mode, this should be skipped.")
-
-    parser.add_argument("--audio_folder",
-                        dest='audio_folder',
-                        default="0",
-                        type=str,
-                        help="Directory with audio files to analyze. If using the audiofile mode, this should be skipped.")
-
-    main(parser.parse_args())
+    main()
