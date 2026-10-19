@@ -11,7 +11,7 @@ from typing import Callable
 import keras
 from keras import layers
 
-WEIGHTS_DIR = Path(__file__).parent / "models"
+WEIGHTS_DIR = Path(__file__).parent / "weights"
 
 
 def _squeeze_channels(x):

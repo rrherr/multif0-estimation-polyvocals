@@ -28,13 +28,16 @@ removed; see the [upstream repository](https://github.com/helenacuesta/multif0-e
 for it.
 
 The pretrained models were trained on HCQT features computed with pumpp 0.5 / librosa 0.7. Newer librosa
-versions compute a noticeably different CQT, so [`features.py`](features.py) re-implements that original
-feature pipeline (including the resampy 0.2.2 resampling filters in `resample_filters/`). Outputs match
+versions compute a noticeably different CQT, so [`multif0/features.py`](multif0/features.py) re-implements that original
+feature pipeline (including the resampy 0.2.2 resampling filters in `multif0/resample_filters/`). Outputs match
 the original TensorFlow 1.15 code to within floating-point noise; see [Tests](#tests).
 
 Long files are processed in ~58 s chunks with enough overlapping context that the result is identical
 to a single pass over the whole file. (The original code also processed the whole file in one pass:
 its chunking loop iterated over the wrong axis.)
+
+The code is an installable package, `multif0`, with the weights and filter tables as package data,
+so it can be used as a library as well as from the command line (see [Use as a library](#use-as-a-library)).
 
 ## Setup
 
@@ -45,6 +48,8 @@ git clone https://github.com/rrherr/multif0-estimation-polyvocals.git
 cd multif0-estimation-polyvocals
 uv sync
 ```
+
+or, to use it from another project, `uv add git+https://github.com/rrherr/multif0-estimation-polyvocals`.
 
 The device is picked automatically: on Apple Silicon `tensorflow-metal` is installed and the GPU is used;
 elsewhere it runs on CPU, or on an NVIDIA GPU if TensorFlow finds the CUDA libraries it was built against
@@ -82,7 +87,22 @@ uv run predict_on_audio.py poly_sing.wav
 uv run predict_on_audio.py --model model1 ../data/vocal_music
 ```
 
-The weight files in `models/` are the original Keras 2 HDF5 weight files (previously named `.pkl`).
+`uv run multif0 ...` is the same command. The weight files in `multif0/weights/` are the original Keras 2 HDF5 weight files (previously named `.pkl`).
+
+## Use as a library
+
+```python
+import multif0
+
+model = multif0.load("model3")              # cpu=True hides the GPU from TensorFlow
+salience = multif0.salience(model, y, sr)    # mono float array y at any rate sr
+times, freqs = multif0.utils.pitch_activations_to_mf0(salience, multif0.PRETRAINED["model3"].threshold)
+```
+
+`salience` has shape (360 bins, frames): rows are `multif0.utils.get_freq_grid()` (20-cent bins from
+32.7 Hz), columns `multif0.utils.get_time_grid(n)` (hop 256 samples at 22050 Hz, 11.6 ms). It equals
+what `predict_on_audio.py --save-salience` writes for the same audio. Importing `multif0` imports
+TensorFlow.
 
 ## Tests
 

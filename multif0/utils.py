@@ -8,7 +8,7 @@ import librosa
 import numpy as np
 import scipy.signal
 
-import features
+from . import features
 
 
 def get_freq_grid():

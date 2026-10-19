@@ -11,10 +11,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import features
-import models
-import predict_on_audio
-import utils
+import multif0
+from multif0 import features, models, utils
+from multif0 import predict as predict_on_audio
 
 DATA = Path(__file__).parent / "data"
 AUDIO = DATA / "synth_satb.wav"
@@ -97,3 +96,12 @@ def test_chunking_matches_single_pass(hcqt, monkeypatch):
     monkeypatch.setattr(predict_on_audio, "CHUNK_FRAMES", 100)
     chunked = predict_on_audio.predict_salience(model, AUDIO)
     np.testing.assert_allclose(chunked, single, atol=1e-5)
+
+
+def test_array_entry_point_matches_file(hcqt):
+    import librosa
+
+    model = models.PRETRAINED["model3"].load()
+    y, sr = librosa.load(AUDIO, sr=None, mono=True)
+    from_file = predict_on_audio.salience_from_features(model, *hcqt)
+    np.testing.assert_array_equal(multif0.salience(model, y, sr), from_file)

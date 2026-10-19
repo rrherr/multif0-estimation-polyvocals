@@ -857,7 +857,7 @@ wheels = [
 [[package]]
 name = "multif0-estimation-polyvocals"
 version = "0.2.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "h5py" },
     { name = "keras" },

@@ -215,6 +215,18 @@ def compute_hcqt(audio_path):
     i.e. the layout the models take as input (minus the batch axis).
     """
     y, sr = librosa.load(audio_path, sr=None, mono=True)
+    return hcqt(y, sr)
+
+
+def hcqt(y, sr):
+    """`compute_hcqt` for mono audio `y` already in memory, at sample rate `sr`.
+
+    `y` is resampled to `SR` with resampy 0.2.2's ``kaiser_best`` filter, as librosa 0.7
+    did when the models were trained.
+    """
+    y = np.asarray(y, dtype=np.float32)
+    if y.ndim != 1:
+        raise ValueError(f"expected mono audio (1-D), got shape {y.shape}")
     if sr != SR:
         y = _resample(y, sr, SR, "kaiser_best")
 
