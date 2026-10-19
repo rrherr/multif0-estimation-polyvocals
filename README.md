@@ -8,7 +8,7 @@ Montreal, Canada (virtual).
 
 Please, cite the aforementioned paper if using this material.
 
-**Note 2:** This project builds upon the **DeepSalience** project:
+**Note:** This project builds upon the **DeepSalience** project:
 
 Rachel M. Bittner, Brian McFee, Justin Salamon, Peter Li, and Juan P. Bello "Deep Salience Representations 
 for F0 Estimation in Polyphonic Music”, ISMIR 2017, Suzhou, China.
@@ -46,8 +46,10 @@ cd multif0-estimation-polyvocals
 uv sync
 ```
 
-On Apple Silicon this installs `tensorflow-metal` and runs on the GPU; elsewhere it runs on CPU
-(or a CUDA GPU if TensorFlow finds one).
+The device is picked automatically: on Apple Silicon `tensorflow-metal` is installed and the GPU is used;
+elsewhere it runs on CPU, or on an NVIDIA GPU if TensorFlow finds the CUDA libraries it was built against
+(on Linux, `uv pip install "tensorflow[and-cuda]==2.19.1"` provides them; this path is untested).
+`--cpu` forces CPU. TensorFlow 2.19 has wheels for Python 3.9 to 3.12, so the project uses Python 3.12.
 
 ## Predict
 

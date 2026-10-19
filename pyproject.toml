@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Multiple F0 estimation in vocal ensembles (Cuesta, McFee & Gómez, ISMIR 2020): inference with the pretrained models"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "tensorflow==2.19.1",
     "tensorflow-metal==1.2.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
