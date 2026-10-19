@@ -21,23 +21,21 @@ https://github.com/rabitt/ismir2017-deepsalience.
 
 ## About this fork
 
-This fork keeps only **inference** with the pretrained models and updates it to a current stack
-(Python 3.12, TensorFlow 2.19 + Keras 3, librosa 1.x), with GPU acceleration on Apple Silicon via
-`tensorflow-metal`. The training and experiment code (`experiments/`, `bsh/`, `utils_train.py`) was
-removed; see the [upstream repository](https://github.com/helenacuesta/multif0-estimation-polyvocals)
-for it.
+This fork keeps only **inference** with the pretrained models, ported to **PyTorch** and packaged as
+an importable library, `multif0`, with a command-line tool. It runs on NVIDIA GPUs (CUDA), Apple
+Silicon GPUs (MPS) or CPU, on Python 3.12 or newer. The training and experiment code (`experiments/`,
+`bsh/`, `utils_train.py`) was removed; see the
+[upstream repository](https://github.com/helenacuesta/multif0-estimation-polyvocals) for it.
 
 The pretrained models were trained on HCQT features computed with pumpp 0.5 / librosa 0.7. Newer librosa
-versions compute a noticeably different CQT, so [`multif0/features.py`](multif0/features.py) re-implements that original
-feature pipeline (including the resampy 0.2.2 resampling filters in `multif0/resample_filters/`). Outputs match
-the original TensorFlow 1.15 code to within floating-point noise; see [Tests](#tests).
+versions compute a noticeably different CQT, so [`multif0/features.py`](multif0/features.py) re-implements
+that original feature pipeline (including the resampy 0.2.2 resampling filters in
+`multif0/resample_filters/`). The original Keras weights were converted to safetensors
+([`tools/convert_weights.py`](tools/convert_weights.py)). Outputs match the original TensorFlow 1.15 code
+to within floating-point noise; see [Tests](#tests).
 
-Long files are processed in ~58 s chunks with enough overlapping context that the result is identical
-to a single pass over the whole file. (The original code also processed the whole file in one pass:
-its chunking loop iterated over the wrong axis.)
-
-The code is an installable package, `multif0`, with the weights and filter tables as package data,
-so it can be used as a library as well as from the command line (see [Use as a library](#use-as-a-library)).
+Audio is processed in ~5.8 s chunks with enough overlapping context that the result is identical to a
+single pass over the whole input.
 
 ## Setup
 
@@ -51,19 +49,15 @@ uv sync
 
 or, to use it from another project, `uv add git+https://github.com/rrherr/multif0-estimation-polyvocals`.
 
-The device is picked automatically: on Apple Silicon `tensorflow-metal` is installed and the GPU is used;
-elsewhere it runs on CPU, or on an NVIDIA GPU if TensorFlow finds the CUDA libraries it was built against
-(on Linux, `uv pip install "tensorflow[and-cuda]==2.19.1"` provides them; this path is untested).
-`--cpu` forces CPU.
-
-On Apple Silicon, TensorFlow is held below 2.20 (and so Python at 3.12) because the latest
-`tensorflow-metal` does not load with newer TensorFlow. Elsewhere there is no upper bound; besides the
-locked versions, the tests also pass with TensorFlow 2.21 and numpy 2.5 on Python 3.13.
+The device is picked automatically: CUDA if available, then Apple Silicon (MPS), then CPU. PyPI's
+`torch` wheels for Linux include CUDA; on Windows, install a CUDA build of torch from
+[pytorch.org](https://pytorch.org/get-started/locally/). `--device` (or `device=` in the library)
+overrides the choice.
 
 ## Predict
 
 ```
-uv run predict_on_audio.py [--model MODEL] [--output-dir DIR] [--save-salience] [--cpu] INPUT [INPUT ...]
+uv run multif0 [--model MODEL] [--output-dir DIR] [--save-salience] [--device DEVICE] INPUT [INPUT ...]
 ```
 
 Each `INPUT` is an audio file (wav, flac, ogg, aiff, mp3) or a folder, in which case every audio file
@@ -72,52 +66,67 @@ in it is processed. For each file, a tab-separated `<name>.csv` is written next 
 F0 estimates in Hz. `--save-salience` also writes the raw model output (360 frequency bins × frames)
 as `<name>_salience.npy`.
 
-| `--model` | Weights | Architecture | Training data | Threshold |
-|---|---|---|---|---|
-| `model1` | `exp1multif0.h5` | Early/Deep | default splits | 0.4 |
-| `model2` | `exp2multif0.h5` | Early/Shallow | default splits | 0.5 |
-| `model3` (default, recommended) | `exp3multif0.h5` | Late/Deep | default splits | 0.5 |
-| `model4` | `exp4multif0.h5` | Late/Deep | without BSQ (paper experiment 2) | 0.4 |
-| `model5` | `exp5multif0.h5` | Late/Deep | without reverb files (paper experiment 3) | 0.5 |
+| `--model` | Original ID | Weights | Architecture | Training data | Threshold |
+|---|---|---|---|---|---|
+| `early-deep` | `model1` | `exp1multif0` | Early/Deep | default splits | 0.4 |
+| `early-shallow` | `model2` | `exp2multif0` | Early/Shallow | default splits | 0.5 |
+| `late-deep` (default, recommended) | `model3` | `exp3multif0` | Late/Deep | default splits | 0.5 |
+| `late-deep-no-bsq` | `model4` | `exp4multif0` | Late/Deep | without BSQ (paper experiment 2) | 0.4 |
+| `late-deep-no-reverb` | `model5` | `exp5multif0` | Late/Deep | without reverb files (paper experiment 3) | 0.5 |
 
-`--threshold` overrides the peak-picking threshold. Examples:
+Models can be named either way. `--threshold` overrides the peak-picking threshold. Examples:
 
 ```
-uv run predict_on_audio.py poly_sing.wav
-uv run predict_on_audio.py --model model1 ../data/vocal_music
+uv run multif0 poly_sing.wav
+uv run multif0 --model early-deep --device cpu ../data/vocal_music
 ```
 
-`uv run multif0 ...` is the same command. The weight files in `multif0/weights/` are the original Keras 2 HDF5 weight files (previously named `.pkl`).
+`uv run predict_on_audio.py ...` is the same command.
 
 ## Use as a library
 
 ```python
 import multif0
 
-model = multif0.load("model3")              # cpu=True hides the GPU from TensorFlow
-salience = multif0.salience(model, y, sr)    # mono float array y at any rate sr
-times, freqs = multif0.utils.pitch_activations_to_mf0(salience, multif0.PRETRAINED["model3"].threshold)
+model = multif0.MultiF0.from_pretrained("late-deep")   # device="auto", "cpu", "cuda", "mps", ...
+pred = model.predict("choir.wav")                       # a file, or samples: model.predict(y, sr=44100)
+pred.times                                              # (frames,) seconds
+pred.freqs                                              # per frame, an array of F0 estimates in Hz
+pred.salience                                           # (360 bins, frames) float32 in [0, 1]
+pred.to_csv("choir.csv")                                # the CLI's output format
+
+salience = model.salience(y, sr=sr)                     # just the salience
+model.release()                                         # free its GPU memory (or `with ... as model:`)
+
+multif0.predict("choir.wav", model="early-deep")        # one-shot; keeps the last model loaded
+multif0.clear_cache()                                   # until this
 ```
 
-`salience` has shape (360 bins, frames): rows are `multif0.utils.get_freq_grid()` (20-cent bins from
-32.7 Hz), columns `multif0.utils.get_time_grid(n)` (hop 256 samples at 22050 Hz, 11.6 ms). It equals
-what `predict_on_audio.py --save-salience` writes for the same audio. Importing `multif0` imports
-TensorFlow.
+In-memory audio is a NumPy array or torch tensor, mono `(n,)` or multichannel `(channels, n)` (averaged
+to mono), at any sample rate `sr`; it is resampled to 22050 Hz. Salience rows are
+`pred.freq_grid` (20-cent bins from 32.7 Hz), columns `pred.times` (hop 256 samples at 22050 Hz,
+`pred.hop` = 11.6 ms); `pred.threshold` is the threshold used for `freqs`.
+
+The networks are plain `torch.nn.Module`s (`multif0.EarlyFusion`, `multif0.LateFusion`; `model.net` for
+a loaded one), taking HCQT features from `multif0.features.hcqt(y, sr)`.
 
 ## Tests
 
 ```
 uv run pytest
+uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
 `tests/test_parity.py` runs every model on a synthetic four-voice clip (`tests/data/synth_satb.wav`,
 generated by `tests/make_synth_fixture.py`) and compares the features, the salience and the F0 output
 with reference outputs of the original code (TensorFlow 1.15.5, Keras 2.3.1, librosa 0.7.2, pumpp 0.5.0)
-stored in `tests/data/synth_satb_ref.npz`.
+stored in `tests/data/synth_satb_ref.npz`. `tests/test_api.py` covers the library API, and checks that
+CUDA and MPS (where available) match the CPU.
 
+On that clip, the PyTorch models' salience is within 2e-5 of the TensorFlow versions on CPU and MPS.
 Against the original code on real recordings (a 3-minute solo vocal and 1- and 3.7-minute two- and
-three-voice mixes), all five models give a maximum salience difference below 0.004, and identical F0
-output in every frame.
+three-voice mixes), the TensorFlow 2 version this port was checked against gave a maximum salience
+difference below 0.004 for all five models, and identical F0 output in every frame.
 
-On an M5 Pro, model3 inference on 3 minutes of audio takes ~4 s on the GPU (~40 s on CPU);
-feature extraction, which runs on CPU, takes about 10 s.
+On an M5 Pro, `late-deep` inference on 3 minutes of audio takes ~7 s on the GPU (MPS) and ~50 s on
+CPU; feature extraction, which runs on CPU, takes about 6 s (from 44.1 kHz). CUDA has not been tested.

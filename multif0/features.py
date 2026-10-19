@@ -15,12 +15,18 @@ Brian McFee).
 """
 
 import functools
+import os
 from pathlib import Path
+from typing import Any
 
 import librosa
 import numba
 import numpy as np
 import scipy.sparse
+from numpy.typing import ArrayLike, NDArray
+
+Array = NDArray[Any]
+Float32 = NDArray[np.float32]
 
 _FILTER_DIR = Path(__file__).parent / "resample_filters"
 
@@ -38,7 +44,7 @@ _BW_FASTEST = 0.85
 _WINDOW = "hann"
 
 
-def _sparsify_rows(x, quantile=0.01):
+def _sparsify_rows(x: Array, quantile: float = 0.01) -> scipy.sparse.csr_matrix:
     mags = np.abs(x)
     norms = np.sum(mags, axis=1, keepdims=True)
     mag_sort = np.sort(mags, axis=1)
@@ -51,7 +57,7 @@ def _sparsify_rows(x, quantile=0.01):
     return x_sparse.tocsr()
 
 
-def _constant_q_lengths(sr, fmin, n_bins, bins_per_octave):
+def _constant_q_lengths(sr: float, fmin: float, n_bins: int, bins_per_octave: int) -> Array:
     q = 1.0 / (2.0 ** (1.0 / bins_per_octave) - 1)
     freq = fmin * (2.0 ** (np.arange(n_bins, dtype=float) / bins_per_octave))
     if freq[-1] * (1 + 0.5 * librosa.filters.window_bandwidth(_WINDOW) / q) > sr / 2.0:
@@ -59,30 +65,36 @@ def _constant_q_lengths(sr, fmin, n_bins, bins_per_octave):
     return q * sr / freq
 
 
-def _cqt_filter_fft(sr, fmin, n_bins, bins_per_octave, sparsity=0.01):
+def _cqt_filter_fft(
+    sr: float, fmin: float, n_bins: int, bins_per_octave: int, sparsity: float = 0.01
+) -> tuple[scipy.sparse.csr_matrix, int]:
     lengths = _constant_q_lengths(sr, fmin, n_bins, bins_per_octave)
     q = 1.0 / (2.0 ** (1.0 / bins_per_octave) - 1)
     freqs = q * sr / lengths
 
     filters = []
-    for ilen, freq in zip(lengths, freqs):
+    for ilen, freq in zip(lengths, freqs, strict=True):
         sig = np.exp(np.arange(-ilen // 2, ilen // 2, dtype=float) * 1j * 2 * np.pi * freq / sr)
         sig = sig * librosa.filters.get_window(_WINDOW, len(sig))
         filters.append(sig / np.sum(np.abs(sig)))
 
     n_fft = int(2.0 ** np.ceil(np.log2(max(lengths))))
-    basis = np.asarray([librosa.util.pad_center(f, size=n_fft) for f in filters], dtype=np.complex64)
+    basis = np.asarray(
+        [librosa.util.pad_center(f, size=n_fft) for f in filters], dtype=np.complex64
+    )
     basis *= lengths[:, np.newaxis] / float(n_fft)
     fft_basis = np.fft.fft(basis, n=n_fft, axis=1)[:, : (n_fft // 2) + 1]
     return _sparsify_rows(fft_basis, quantile=sparsity), n_fft
 
 
-def _cqt_response(y, n_fft, hop_length, fft_basis):
+def _cqt_response(
+    y: Array, n_fft: int, hop_length: int, fft_basis: scipy.sparse.csr_matrix
+) -> Array:
     stft = librosa.stft(y, n_fft=n_fft, hop_length=hop_length, window="ones", pad_mode="reflect")
     return fft_basis.dot(stft)
 
 
-def _num_two_factors(x):
+def _num_two_factors(x: int) -> int:
     num_twos = 0
     while x > 0 and x % 2 == 0:
         num_twos += 1
@@ -91,13 +103,15 @@ def _num_two_factors(x):
 
 
 @functools.cache
-def _load_filter(name):
+def _load_filter(name: str) -> tuple[Array, int]:
     data = np.load(_FILTER_DIR / f"{name}.npz")
     return data["half_window"], int(data["precision"])
 
 
 @numba.jit(nopython=True, nogil=True, cache=True)
-def _resample_f(x, y, sample_ratio, interp_win, interp_delta, num_table):
+def _resample_f(
+    x: Array, y: Array, sample_ratio: float, interp_win: Array, interp_delta: Array, num_table: int
+) -> None:
     scale = min(1.0, sample_ratio)
     time_increment = 1.0 / sample_ratio
     index_step = int(scale * num_table)
@@ -115,7 +129,9 @@ def _resample_f(x, y, sample_ratio, interp_win, interp_delta, num_table):
         offset = int(index_frac)
         eta = index_frac - offset
         for i in range(min(n + 1, (nwin - offset) // index_step)):
-            weight = interp_win[offset + i * index_step] + eta * interp_delta[offset + i * index_step]
+            weight = (
+                interp_win[offset + i * index_step] + eta * interp_delta[offset + i * index_step]
+            )
             y[t] += weight * x[n - i]
 
         # right wing of the filter response
@@ -124,13 +140,17 @@ def _resample_f(x, y, sample_ratio, interp_win, interp_delta, num_table):
         offset = int(index_frac)
         eta = index_frac - offset
         for k in range(min(n_orig - n - 1, (nwin - offset) // index_step)):
-            weight = interp_win[offset + k * index_step] + eta * interp_delta[offset + k * index_step]
+            weight = (
+                interp_win[offset + k * index_step] + eta * interp_delta[offset + k * index_step]
+            )
             y[t] += weight * x[n + k + 1]
 
         time_register += time_increment
 
 
-def _resample(y, orig_sr, target_sr, res_type, scale=False):
+def _resample(
+    y: Array, orig_sr: float, target_sr: float, res_type: str, scale: bool = False
+) -> Array:
     """Band-limited sinc resampling, matching librosa 0.7.2 + resampy 0.2.2.
 
     resampy >= 0.3 regenerated its filter tables, so its output differs.
@@ -153,12 +173,16 @@ def _resample(y, orig_sr, target_sr, res_type, scale=False):
     return y_hat
 
 
-def cqt(y, sr, hop_length, fmin, n_bins, bins_per_octave):
+def cqt(
+    y: Array, sr: float, hop_length: int, fmin: float, n_bins: int, bins_per_octave: int
+) -> Array:
     """Complex CQT, numerically matching ``librosa.cqt`` from librosa 0.7.2."""
     n_octaves = int(np.ceil(float(n_bins) / bins_per_octave))
     n_filters = min(bins_per_octave, n_bins)
 
-    freqs = librosa.cqt_frequencies(n_bins, fmin=fmin, bins_per_octave=bins_per_octave)[-bins_per_octave:]
+    freqs = librosa.cqt_frequencies(n_bins, fmin=fmin, bins_per_octave=bins_per_octave)[
+        -bins_per_octave:
+    ]
     fmin_t, fmax_t = np.min(freqs), np.max(freqs)
     q = 1.0 / (2.0 ** (1.0 / bins_per_octave) - 1)
     bandwidth = librosa.filters.window_bandwidth(_WINDOW)
@@ -171,7 +195,7 @@ def cqt(y, sr, hop_length, fmin, n_bins, bins_per_octave):
     downsample_count2 = max(0, _num_two_factors(hop_length) - n_octaves + 1)
     downsample_count = min(downsample_count1, downsample_count2)
     if downsample_count > 0 and res_type == "kaiser_fast":
-        factor = 2 ** downsample_count
+        factor = 2**downsample_count
         hop_length //= factor
         new_sr = sr / float(factor)
         y = _resample(y, sr, new_sr, res_type, scale=True)
@@ -208,17 +232,19 @@ def cqt(y, sr, hop_length, fmin, n_bins, bins_per_octave):
     return C / np.sqrt(lengths[:, np.newaxis])
 
 
-def compute_hcqt(audio_path):
+def compute_hcqt(audio_path: str | os.PathLike[str]) -> tuple[Float32, Float32]:
     """Compute HCQT log-magnitude and phase differentials for an audio file.
 
     Returns ``(mag, dphase)``, each float32 of shape (n_bins, n_frames, n_harmonics),
     i.e. the layout the models take as input (minus the batch axis).
     """
     y, sr = librosa.load(audio_path, sr=None, mono=True)
+    if y.size == 0:
+        raise ValueError(f"empty audio: {audio_path}")
     return hcqt(y, sr)
 
 
-def hcqt(y, sr):
+def hcqt(y: ArrayLike, sr: float) -> tuple[Float32, Float32]:
     """`compute_hcqt` for mono audio `y` already in memory, at sample rate `sr`.
 
     `y` is resampled to `SR` with resampy 0.2.2's ``kaiser_best`` filter, as librosa 0.7
@@ -230,7 +256,9 @@ def hcqt(y, sr):
     if sr != SR:
         y = _resample(y, sr, SR, "kaiser_best")
 
-    n_frames = int(librosa.time_to_frames(librosa.get_duration(y=y, sr=SR), sr=SR, hop_length=HOP_LENGTH))
+    n_frames = int(
+        librosa.time_to_frames(librosa.get_duration(y=y, sr=SR), sr=SR, hop_length=HOP_LENGTH)
+    )
 
     mags, phases = [], []
     for h in HARMONICS:

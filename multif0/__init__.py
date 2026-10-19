@@ -1,44 +1,38 @@
-"""Multiple F0 estimation in vocal ensembles (Cuesta, McFee & Gómez, ISMIR 2020).
+"""Multiple F0 estimation in vocal ensembles (Cuesta, McFee & Gómez, ISMIR 2020), in PyTorch.
 
-    import multif0
-    model = multif0.load("model3")
-    salience = multif0.salience(model, y, sr)   # (360 bins, frames), hop HOP_LENGTH at SR
-    times, freqs = multif0.utils.pitch_activations_to_mf0(salience, multif0.PRETRAINED["model3"].threshold)
+import multif0
 
-Importing this package imports TensorFlow.
+model = multif0.MultiF0.from_pretrained("late-deep")    # device="auto": CUDA, MPS or CPU
+pred = model.predict("choir.wav")                        # or model.predict(y, sr=sr)
+pred.times, pred.freqs                                   # F0 estimates (Hz) per frame
+pred.salience                                            # (360 bins, frames)
+
+multif0.predict("choir.wav")                             # one-shot, keeps the model loaded
 """
 
-import os
+from . import features, models, utils
+from .core import AudioInput, MultiF0, Prediction, clear_cache, predict
+from .devices import resolve_device
+from .features import HOP_LENGTH, N_BINS, SR
+from .models import DEFAULT_MODEL, PRETRAINED, EarlyFusion, LateFusion, Pretrained, SalienceNet
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
-from . import features, models, predict, utils  # noqa: E402
-from .features import HOP_LENGTH, SR  # noqa: E402
-from .models import PRETRAINED  # noqa: E402
-
-__all__ = ["HOP_LENGTH", "PRETRAINED", "SR", "features", "load", "models", "predict", "salience", "utils"]
-
-
-def load(name="model3", cpu=False):
-    """Build pretrained model `name` (see `PRETRAINED`) and load its weights.
-
-    `cpu` hides the GPU from TensorFlow, which only works before TensorFlow first uses it
-    (in this process); later calls keep whatever devices TensorFlow already set up.
-    """
-    if cpu:
-        import tensorflow as tf
-
-        try:
-            tf.config.set_visible_devices([], "GPU")
-        except RuntimeError:
-            pass
-    return PRETRAINED[name].load()
-
-
-def salience(model, y, sr):
-    """The model's pitch salience for mono audio `y` at rate `sr`: (360, n_frames) float32.
-
-    Rows are the bins of `utils.get_freq_grid()`, columns the frames of `utils.get_time_grid()`
-    (hop `HOP_LENGTH` samples at `SR`).
-    """
-    return predict.salience_from_features(model, *features.hcqt(y, sr))
+__all__ = [
+    "DEFAULT_MODEL",
+    "HOP_LENGTH",
+    "N_BINS",
+    "PRETRAINED",
+    "SR",
+    "AudioInput",
+    "EarlyFusion",
+    "LateFusion",
+    "MultiF0",
+    "Prediction",
+    "Pretrained",
+    "SalienceNet",
+    "clear_cache",
+    "features",
+    "models",
+    "predict",
+    "resolve_device",
+    "utils",
+]

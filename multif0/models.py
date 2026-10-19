@@ -1,100 +1,188 @@
-"""Network architectures of the pretrained models, plus loading helpers.
+"""Network architectures of the pretrained models, and the registry of their weights.
 
-Layer construction order must stay as is: the Keras 2 HDF5 weight files are
-loaded by topological order, not by layer name.
+Inputs are HCQT magnitude and phase differentials, each (batch, 5 harmonics, 360 bins, frames);
+the output is the pitch salience, (batch, 360 bins, frames), in [0, 1].
+
+Modules are named after the original Keras layers: each convolution keeps its Keras name, and
+each batch norm is named after the layer it normalizes ("mag" and "dphase" for the inputs).
+`tools/convert_weights.py` relies on this to map the Keras weights.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
-import keras
-from keras import layers
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
+# Keras' default batch norm epsilon, which the models were trained with
+BN_EPS = 1e-3
 
-def _squeeze_channels(x):
-    return layers.Lambda(lambda t: keras.ops.squeeze(t, axis=3), name="squeeze")(x)
-
-
-def _conv(filters, kernel, name, activation="relu"):
-    return layers.Conv2D(filters, kernel, padding="same", activation=activation, name=name)
-
-
-def _harmonic_stack(x, suffix=""):
-    """conv1-conv4 (5x5) and the two 70x3 'harmonic' convs, each followed by batch norm."""
-    for i, filters in enumerate([16, 32, 32, 32], start=1):
-        x = layers.BatchNormalization()(_conv(filters, (5, 5), f"conv{i}{suffix}")(x))
-    x = layers.BatchNormalization()(_conv(32, (70, 3), f"harm1{suffix}")(x))
-    x = layers.BatchNormalization()(_conv(32, (70, 3), f"harm2{suffix}")(x))
-    return x
+# Most elements a CPU convolution may unfold at once (512 MB of float32). Without oneDNN (e.g. on
+# Apple Silicon), torch's CPU convolution unfolds its whole input (im2col): for the 360x1 kernel
+# that is 33 MB per frame, so a minute of audio would need ~170 GB.
+CPU_UNFOLD_BUDGET = 2**27
 
 
-def _head(x, deep):
-    if deep:
-        x = layers.BatchNormalization()(_conv(64, (3, 3), "conv7")(x))
-        x = layers.BatchNormalization()(_conv(64, (3, 3), "conv8")(x))
-    x = layers.BatchNormalization()(_conv(8, (360, 1), "distribution")(x))
-    x = _conv(1, (1, 1), "squishy", activation="sigmoid")(x)
-    return _squeeze_channels(x)
+class SameConv2d(nn.Conv2d):
+    """Conv2d with Keras' "same" padding: for an even kernel, the extra row/column goes after.
+
+    On CPU, wide inputs are convolved in overlapping slices along the last (time) axis to bound
+    memory; the result is the same.
+    """
+
+    def forward(self, x: Tensor) -> Tensor:
+        kh, kw = self.kernel_size
+        x = F.pad(x, ((kw - 1) // 2, kw // 2, (kh - 1) // 2, kh // 2))
+        n_out = x.shape[-1] - kw + 1
+        per_frame = self.in_channels * kh * kw * (x.shape[-2] - kh + 1)
+        step = max(1, CPU_UNFOLD_BUDGET // per_frame)
+        if x.device.type != "cpu" or step >= n_out:
+            return super().forward(x)
+        slices = [super().forward(x[..., s : s + step + kw - 1]) for s in range(0, n_out, step)]
+        return torch.cat(slices, dim=-1)
 
 
-def _inputs():
-    # HCQT magnitude and phase differentials: (freq bins, time frames, harmonics)
-    return keras.Input(shape=(None, None, 5)), keras.Input(shape=(None, None, 5))
+class SalienceNet(nn.Module):
+    """Shared building blocks: named convolutions and batch norms, and the common head."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.convs = nn.ModuleDict()
+        self.norms = nn.ModuleDict()
+
+    def _add_conv(self, name: str, in_ch: int, out_ch: int, kernel: tuple[int, int]) -> None:
+        self.convs[name] = SameConv2d(in_ch, out_ch, kernel)
+        self.norms[name] = nn.BatchNorm2d(out_ch, eps=BN_EPS)
+
+    def _add_input_norms(self) -> None:
+        for name in ("mag", "dphase"):
+            self.norms[name] = nn.BatchNorm2d(5, eps=BN_EPS)
+
+    def _add_head(self, in_ch: int, deep: bool) -> None:
+        if deep:
+            self._add_conv("conv7", in_ch, 64, (3, 3))
+            self._add_conv("conv8", 64, 64, (3, 3))
+            in_ch = 64
+        self._add_conv("distribution", in_ch, 8, (360, 1))
+        self.convs["squishy"] = SameConv2d(8, 1, (1, 1))
+
+    def _block(self, name: str, x: Tensor) -> Tensor:
+        """Conv, ReLU, then batch norm, as in the original Keras models."""
+        out: Tensor = self.norms[name](F.relu(self.convs[name](x)))
+        return out
+
+    def _head(self, x: Tensor) -> Tensor:
+        for name in ("conv7", "conv8", "distribution"):
+            if name in self.convs:
+                x = self._block(name, x)
+        return torch.sigmoid(self.convs["squishy"](x)).squeeze(1)
 
 
-def _early_fusion(deep):
-    mag, dphase = _inputs()
-    a = layers.BatchNormalization()(mag)
-    b = layers.BatchNormalization()(dphase)
-    a = layers.BatchNormalization()(_conv(16, (5, 5), "conv1a")(a))
-    b = layers.BatchNormalization()(_conv(16, (5, 5), "conv1b")(b))
-    x = layers.Concatenate()([a, b])
-    for i in (2, 3, 4):
-        x = layers.BatchNormalization()(_conv(32, (5, 5), f"conv{i}")(x))
-    x = layers.BatchNormalization()(_conv(32, (70, 3), "harm1")(x))
-    x = layers.BatchNormalization()(_conv(32, (70, 3), "harm2")(x))
-    return keras.Model(inputs=[mag, dphase], outputs=_head(x, deep))
+class EarlyFusion(SalienceNet):
+    """Early/Deep (`deep=True`) and Early/Shallow: magnitude and phase merge after conv1."""
+
+    def __init__(self, deep: bool = True) -> None:
+        super().__init__()
+        self._add_input_norms()
+        self._add_conv("conv1a", 5, 16, (5, 5))
+        self._add_conv("conv1b", 5, 16, (5, 5))
+        self._add_conv("conv2", 32, 32, (5, 5))
+        self._add_conv("conv3", 32, 32, (5, 5))
+        self._add_conv("conv4", 32, 32, (5, 5))
+        self._add_conv("harm1", 32, 32, (70, 3))
+        self._add_conv("harm2", 32, 32, (70, 3))
+        self._add_head(32, deep)
+
+    def forward(self, mag: Tensor, dphase: Tensor) -> Tensor:
+        a = self._block("conv1a", self.norms["mag"](mag))
+        b = self._block("conv1b", self.norms["dphase"](dphase))
+        x = torch.cat([a, b], dim=1)
+        for name in ("conv2", "conv3", "conv4", "harm1", "harm2"):
+            x = self._block(name, x)
+        return self._head(x)
 
 
-def build_model1():
-    """Early/Deep"""
-    return _early_fusion(deep=True)
+class LateFusion(SalienceNet):
+    """Late/Deep: magnitude and phase each go through their own conv1-harm2 stack, then merge."""
+
+    _STACK = (("conv1", 16, (5, 5)), ("conv2", 32, (5, 5)), ("conv3", 32, (5, 5)),
+              ("conv4", 32, (5, 5)), ("harm1", 32, (70, 3)), ("harm2", 32, (70, 3)))  # fmt: skip
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._add_input_norms()
+        for branch in "ab":
+            in_ch = 5
+            for name, out_ch, kernel in self._STACK:
+                self._add_conv(name + branch, in_ch, out_ch, kernel)
+                in_ch = out_ch
+        self._add_head(64, deep=True)
+
+    def _stack(self, x: Tensor, branch: str) -> Tensor:
+        for name, _, _ in self._STACK:
+            x = self._block(name + branch, x)
+        return x
+
+    def forward(self, mag: Tensor, dphase: Tensor) -> Tensor:
+        a = self._stack(self.norms["mag"](mag), "a")
+        b = self._stack(self.norms["dphase"](dphase), "b")
+        return self._head(torch.cat([a, b], dim=1))
 
 
-def build_model2():
-    """Early/Shallow"""
-    return _early_fusion(deep=False)
-
-
-def build_model3():
-    """Late/Deep"""
-    mag, dphase = _inputs()
-    a = _harmonic_stack(layers.BatchNormalization()(mag), "a")
-    b = _harmonic_stack(layers.BatchNormalization()(dphase), "b")
-    x = layers.Concatenate()([a, b])
-    return keras.Model(inputs=[mag, dphase], outputs=_head(x, deep=True))
+ARCHITECTURES: dict[str, Callable[[], SalienceNet]] = {
+    "early-deep": lambda: EarlyFusion(deep=True),
+    "early-shallow": lambda: EarlyFusion(deep=False),
+    "late-deep": LateFusion,
+}
 
 
 @dataclass(frozen=True)
-class PretrainedModel:
-    builder: Callable[[], keras.Model]
+class Pretrained:
+    """A pretrained model: its architecture, weights file and tuned peak threshold."""
+
+    name: str
+    alias: str
+    architecture: str
     weights: str
     threshold: float
     description: str
 
-    def load(self):
-        model = self.builder()
-        model.load_weights(WEIGHTS_DIR / self.weights)
-        return model
+    def build(self) -> SalienceNet:
+        """The network, with its weights loaded, in eval mode, on CPU."""
+        from safetensors.torch import load_file
+
+        net = ARCHITECTURES[self.architecture]()
+        net.load_state_dict(load_file(WEIGHTS_DIR / self.weights))
+        return net.eval()
 
 
-PRETRAINED = {
-    "model1": PretrainedModel(build_model1, "exp1multif0.h5", 0.4, "Early/Deep"),
-    "model2": PretrainedModel(build_model2, "exp2multif0.h5", 0.5, "Early/Shallow"),
-    "model3": PretrainedModel(build_model3, "exp3multif0.h5", 0.5, "Late/Deep (recommended)"),
-    "model4": PretrainedModel(build_model3, "exp4multif0.h5", 0.4, "Late/Deep, trained without BSQ (paper exp. 2)"),
-    "model5": PretrainedModel(build_model3, "exp5multif0.h5", 0.5, "Late/Deep, trained without reverb files (paper exp. 3)"),
-}
+PRETRAINED: dict[str, Pretrained] = {
+    p.name: p
+    for p in [
+        Pretrained("early-deep", "model1", "early-deep", "exp1multif0.safetensors", 0.4,
+                   "Early/Deep"),
+        Pretrained("early-shallow", "model2", "early-shallow", "exp2multif0.safetensors", 0.5,
+                   "Early/Shallow"),
+        Pretrained("late-deep", "model3", "late-deep", "exp3multif0.safetensors", 0.5,
+                   "Late/Deep (recommended)"),
+        Pretrained("late-deep-no-bsq", "model4", "late-deep", "exp4multif0.safetensors", 0.4,
+                   "Late/Deep, trained without BSQ (paper experiment 2)"),
+        Pretrained("late-deep-no-reverb", "model5", "late-deep", "exp5multif0.safetensors", 0.5,
+                   "Late/Deep, trained without the reverb files (paper experiment 3)"),
+    ]
+}  # fmt: skip
+
+DEFAULT_MODEL = "late-deep"
+
+
+def get_pretrained(name: str) -> Pretrained:
+    """Look up a pretrained model by name ("late-deep") or by its original ID ("model3")."""
+    for p in PRETRAINED.values():
+        if name in (p.name, p.alias):
+            return p
+    choices = ", ".join(f"{p.name} ({p.alias})" for p in PRETRAINED.values())
+    raise ValueError(f"unknown model {name!r}; choose one of: {choices}")

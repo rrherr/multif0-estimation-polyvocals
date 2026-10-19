@@ -6,17 +6,13 @@ bins at the -80 dB floor, where the phase is numerically arbitrary.
 """
 
 import csv
-from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import AUDIO, DATA
 
 import multif0
-from multif0 import features, models, utils
-from multif0 import predict as predict_on_audio
-
-DATA = Path(__file__).parent / "data"
-AUDIO = DATA / "synth_satb.wav"
+from multif0 import cli, core, features, models, utils
 
 
 @pytest.fixture(scope="module")
@@ -31,9 +27,9 @@ def hcqt():
     return features.compute_hcqt(AUDIO)
 
 
-@pytest.fixture(scope="module", params=list(models.PRETRAINED))
-def pretrained(request):
-    return request.param, models.PRETRAINED[request.param], models.PRETRAINED[request.param].load()
+@pytest.fixture(scope="module", params=[p.name for p in multif0.PRETRAINED.values()])
+def model(request):
+    return multif0.MultiF0.from_pretrained(request.param, device="cpu")
 
 
 def test_features_match_reference(hcqt, ref):
@@ -46,33 +42,31 @@ def test_features_match_reference(hcqt, ref):
     assert wrapped[above_floor].max() < 0.01  # radians
 
 
-def test_model_matches_reference_on_reference_features(pretrained, ref, monkeypatch):
-    key, _, model = pretrained
-    monkeypatch.setattr(features, "compute_hcqt", lambda _: (ref["mag"], ref["dphase"]))
-    salience = predict_on_audio.predict_salience(model, AUDIO)
-    np.testing.assert_allclose(salience, ref[f"saliency_{key}"], atol=1e-4)
+def test_model_matches_reference_on_reference_features(model, ref):
+    salience = model.salience_from_features(ref["mag"], ref["dphase"])
+    np.testing.assert_allclose(salience, ref[f"saliency_{model.pretrained.alias}"], atol=1e-4)
 
 
-def test_end_to_end_matches_reference(pretrained, ref, hcqt, monkeypatch):
-    key, pm, model = pretrained
-    monkeypatch.setattr(features, "compute_hcqt", lambda _: hcqt)
-    salience = predict_on_audio.predict_salience(model, AUDIO)
-    expected = ref[f"saliency_{key}"]
+def test_end_to_end_matches_reference(model, ref, hcqt):
+    salience = model.salience_from_features(*hcqt)
+    expected = ref[f"saliency_{model.pretrained.alias}"]
     assert salience.shape == expected.shape
     err = np.abs(salience - expected)
     assert err.max() < 0.05
     assert err.mean() < 1e-4
 
-    _, freqs = utils.pitch_activations_to_mf0(salience, pm.threshold)
-    _, ref_freqs = utils.pitch_activations_to_mf0(expected, pm.threshold)
-    differing = sum(len(a) != len(b) or not np.allclose(a, b) for a, b in zip(freqs, ref_freqs))
+    _, freqs = utils.pitch_activations_to_mf0(salience, model.threshold)
+    _, ref_freqs = utils.pitch_activations_to_mf0(expected, model.threshold)
+    differing = sum(
+        len(a) != len(b) or not np.allclose(a, b) for a, b in zip(freqs, ref_freqs, strict=True)
+    )
     assert differing <= 0.01 * len(freqs)
 
 
 def test_cli_finds_the_four_voices(tmp_path):
-    from make_synth_fixture import SR, DURATION, VOICES
+    from make_synth_fixture import DURATION, SR, VOICES
 
-    predict_on_audio.main([str(AUDIO), "--output-dir", str(tmp_path), "--save-salience"])
+    cli.main([str(AUDIO), "--output-dir", str(tmp_path), "--save-salience", "--device", "cpu"])
 
     with open(tmp_path / "synth_satb.csv", newline="") as f:
         rows = [[float(x) for x in row] for row in csv.reader(f, delimiter="\t")]
@@ -90,18 +84,17 @@ def test_cli_finds_the_four_voices(tmp_path):
 
 
 def test_chunking_matches_single_pass(hcqt, monkeypatch):
-    model = models.PRETRAINED["model3"].load()
-    monkeypatch.setattr(features, "compute_hcqt", lambda _: hcqt)
-    single = predict_on_audio.predict_salience(model, AUDIO)
-    monkeypatch.setattr(predict_on_audio, "CHUNK_FRAMES", 100)
-    chunked = predict_on_audio.predict_salience(model, AUDIO)
-    np.testing.assert_allclose(chunked, single, atol=1e-5)
+    model = multif0.MultiF0.from_pretrained(device="cpu")
+    monkeypatch.setattr(core, "CHUNK_FRAMES", 10_000)
+    single = model.salience_from_features(*hcqt)
+    monkeypatch.setattr(core, "CHUNK_FRAMES", 100)
+    chunked = model.salience_from_features(*hcqt)
+    np.testing.assert_allclose(chunked, single, atol=1e-4)  # conv algorithm noise
 
 
-def test_array_entry_point_matches_file(hcqt):
-    import librosa
-
-    model = models.PRETRAINED["model3"].load()
-    y, sr = librosa.load(AUDIO, sr=None, mono=True)
-    from_file = predict_on_audio.salience_from_features(model, *hcqt)
-    np.testing.assert_array_equal(multif0.salience(model, y, sr), from_file)
+def test_sliced_cpu_convolution_matches_single_pass(hcqt, monkeypatch):
+    model = multif0.MultiF0.from_pretrained(device="cpu")
+    whole = model.salience_from_features(*hcqt)
+    monkeypatch.setattr(models, "CPU_UNFOLD_BUDGET", 2**20)  # a few frames per slice
+    sliced = model.salience_from_features(*hcqt)
+    np.testing.assert_allclose(sliced, whole, atol=1e-4)
